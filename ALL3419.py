@@ -1,99 +1,166 @@
-import requests
-import time
-import numpy as np
-from bs4 import BeautifulSoup
+"""Read temperature and humidity values from an ALLNET ALL3419 network sensor.
+
+The device's web interface loads its values via AJAX requests that require a
+request token (embedded in the start page), the session cookie and a current
+unix timestamp. This module reproduces those requests.
+"""
+
+from __future__ import annotations
+
 import json
+import time
+from collections.abc import Mapping
+from typing import Any
 
-#---------------------------------------------------------
-# Reads temperature and humidity values from AllNet AL3419
-#---------------------------------------------------------
+import requests
+from bs4 import BeautifulSoup
+
+__all__ = ["ALL3419", "ALL3419Error"]
+
+DEFAULT_TIMEOUT = 10.0
+
+# Form fields sent by the device's own web interface when polling the sensors.
+_SENSOR_ARGUMENTS: dict[str, str] = {
+    "q": "1",
+    "elements[0][id]": "1",
+    "elements[0][view]": "0",
+    "elements[0][type]": "4",
+    "elements[1][id]": "99",
+    "elements[2][id]": "104",
+    "elements[2][view]": "0",
+    "elements[2][type]": "4",
+    "elements[3][id]": "105",
+    "elements[3][view]": "0",
+    "elements[3][type]": "4",
+    "elements[4][id]": "106",
+    "elements[4][view]": "0",
+    "elements[4][type]": "4",
+    "elements[5][id]": "107",
+    "elements[5][view]": "0",
+    "elements[5][type]": "4",
+    "device": "ALL3419",
+}
+
+
+class ALL3419Error(Exception):
+    """Raised when the sensor cannot be reached or returns unexpected data."""
+
+
 class ALL3419:
-    def __init__(self, url):
-        self.url = url
+    """Client for an ALLNET ALL3419 temperature/humidity sensor.
 
-    #Recreates arguments from HTTP Post (ajax)
-    def GenerateArguments(self):
-        enc = "q=1&elements[0][id]=1&elements[0][view]=0&elements[0][type]=4&elements[1][id]=99&elements[2][id]=104&elements[2][view]=0&elements[2][type]=4&elements[3][id]=105&elements[3][view]=0&elements[3][type]=4&elements[4][id]=106&elements[4][view]=0&elements[4][type]=4&elements[5][id]=107&elements[5][view]=0&elements[5][type]=4&device=ALL3419"
-        vs = enc.split("&")
+    :param url: Base URL of the device, e.g. ``"http://192.168.0.10/"``.
+    :param timeout: Timeout in seconds for every HTTP request.
+    :param verify: TLS certificate verification, passed to ``requests``
+        (``True``, ``False`` or a path to a CA bundle).
+    :param session: Optional ``requests.Session`` to use.
+    """
 
-        arguments = {}
+    def __init__(
+        self,
+        url: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        verify: bool | str = True,
+        session: requests.Session | None = None,
+    ) -> None:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("url must start with http:// or https://")
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.verify = verify
+        self.session = session or requests.Session()
 
-        for e in vs:
-            s = e.split("=")
-            arguments[s[0]] = s[1]
+    def __enter__(self) -> ALL3419:
+        return self
 
-        arguments["ts"] = str(int(np.round(time.time())))
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
-        return arguments
+    def close(self) -> None:
+        self.session.close()
 
-    #Returns data from given php file
-    #Note that a validation token, a cookie and a correct unix timestamp have to be set (done here automatically)
-    def GetData(self, path, arguments=None):
+    @staticmethod
+    def generate_arguments() -> dict[str, str]:
+        """Return the form fields used to poll all sensors."""
+        return dict(_SENSOR_ARGUMENTS)
+
+    def get_data(self, path: str, arguments: Mapping[str, str] | None = None) -> str:
+        """POST ``arguments`` to ``path`` on the device and return the response body.
+
+        The request token, session cookie and timestamp are set automatically.
+        """
         try:
-            session = requests.Session()
+            r = self.session.get(self.url + "/", timeout=self.timeout, verify=self.verify)
+            r.raise_for_status()
 
-            r = requests.get(self.url)
-            doc = BeautifulSoup(r.content, "html.parser")
-            token = doc.find("meta", {"name" : "X-Request-Token"})["content"]
+            meta = BeautifulSoup(r.content, "html.parser").find("meta", {"name": "X-Request-Token"})
+            token = meta.get("content") if meta is not None else None
+            if not token:
+                raise ALL3419Error("X-Request-Token not found on start page")
 
-            cookies = dict(r.cookies)
-            headers = {"X-Request-Token": token, "X-Requested-With": "XMLHttpRequest"}
+            args = dict(arguments) if arguments is not None else self.generate_arguments()
+            args["ts"] = str(round(time.time()))
 
-            if(arguments == None):
-                args = self.GenerateArguments()
-            else:
-                args = arguments
-                args["ts"] = str(int(np.round(time.time())))
-
-            r = requests.post(self.url + path, data=args, cookies=cookies, headers=headers)
-
+            r = self.session.post(
+                self.url + "/" + path.lstrip("/"),
+                data=args,
+                headers={"X-Request-Token": str(token), "X-Requested-With": "XMLHttpRequest"},
+                timeout=self.timeout,
+                verify=self.verify,
+            )
+            r.raise_for_status()
             return r.text
-        except Exception as e:
-            print(e)
-            return -1
+        except requests.RequestException as e:
+            raise ALL3419Error(f"Request to {self.url} failed: {e}") from e
 
-    #Returns pairs of id-numbers and their corresponding values
-    def GetNameNumberPairs(self):
-        data = self.GetData("/sensorpanel.php", arguments={"gw":"0", "site":"sensorpanel"})
+    def get_name_number_pairs(self) -> dict[str, str]:
+        """Return a mapping of sensor id to sensor name."""
+        data = self.get_data("/sensorpanel.php", arguments={"gw": "0", "site": "sensorpanel"})
         soup = BeautifulSoup(data, "html.parser")
-        finds = soup.find_all("div", {"class" : "sensor_message"})
 
-        pairs = {}
-
-        for f in finds:
-            try:
-                name = f["name"]
-                id = f["id"].split("_")[-1]
-                unit = f["unit"]
-
-                if unit == "°C":
-                    pairs[id] = name
-                else:
-                    pairs[id] = name+" Humidity"
-            except:
-                pass
+        pairs: dict[str, str] = {}
+        for f in soup.find_all("div", {"class": "sensor_message"}):
+            name, element_id, unit = f.get("name"), f.get("id"), f.get("unit")
+            if not (name and element_id and unit):
+                continue
+            sensor_id = str(element_id).split("_")[-1]
+            pairs[sensor_id] = str(name) if unit == "°C" else f"{name} Humidity"
         return pairs
 
-    #returns all temperatures as dictionary, where the index is the name of the sensor and the value is the temperature / humidity
-    def GetTemperature(self):
+    def get_temperature(self) -> dict[str, float]:
+        """Return all values as a dict mapping sensor name to temperature / humidity."""
+        text = self.get_data("/ajax/read_sensors.php")
         try:
-            text = self.GetData("/ajax/read_sensors.php")
-            data = json.loads(text)
+            data: dict[str, Any] = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ALL3419Error(f"Invalid JSON from sensor: {e}") from e
+        if not isinstance(data, dict):
+            raise ALL3419Error("Unexpected sensor response format")
 
-            pairs = self.GetNameNumberPairs()
+        pairs = self.get_name_number_pairs()
 
-            results = {}
-            for k in data.keys():
-                if k in pairs.keys():
-                    results[pairs[k]] = float(data[k]["value"])
+        results: dict[str, float] = {}
+        for sensor_id, name in pairs.items():
+            entry = data.get(sensor_id)
+            if not isinstance(entry, dict) or "value" not in entry:
+                continue
+            try:
+                results[name] = float(entry["value"])
+            except (TypeError, ValueError):
+                continue
+        return results
 
-            return results
-
-        except Exception as e:
-            print(e)
-            return -1
+    # Backwards-compatible names
+    GenerateArguments = generate_arguments
+    GetData = get_data
+    GetNameNumberPairs = get_name_number_pairs
+    GetTemperature = get_temperature
 
 
 if __name__ == "__main__":
-    tc = ALL3419("http://address/")
-    print(tc.GetTemperature())
+    import sys
+
+    if len(sys.argv) != 2:
+        sys.exit(f"usage: {sys.argv[0]} http://address/")
+    with ALL3419(sys.argv[1]) as sensor:
+        print(sensor.get_temperature())
