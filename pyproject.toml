@@ -1,0 +1,37 @@
+[project]
+name = "all3419"
+version = "1.0.0"
+description = "Read temperature and humidity values from an ALLNET ALL3419 network sensor"
+authors = [{ name = "counter2555" }]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.32.4,<3",
+    "beautifulsoup4>=4.12,<5",
+]
+
+[project.urls]
+Repository = "https://github.com/counter2555/PythonALL3419"
+
+[tool.poetry]
+packages = [{ include = "ALL3419.py" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.1"
+responses = "^0.25"
+ruff = "^0.17"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]
+
+[build-system]
+requires = ["poetry-core>=2.0,<3"]
+build-backend = "poetry.core.masonry.api"
